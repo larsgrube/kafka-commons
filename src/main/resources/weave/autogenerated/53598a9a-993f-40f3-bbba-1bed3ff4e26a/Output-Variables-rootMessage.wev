@@ -1,0 +1,4 @@
+%dw 2.0
+
+type auto_53598a9a_993f_40f3_bbba_1bed3ff4e26a_Output_Variables_rootMessage = {|  |} {"typeId": "org.mule.runtime.api.message.Message"}
+

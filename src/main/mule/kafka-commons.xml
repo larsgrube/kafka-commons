@@ -1,5 +1,126 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
-<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
-	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-	xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd"></mule>
+<mule xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:scripting="http://www.mulesoft.org/schema/mule/scripting"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/scripting http://www.mulesoft.org/schema/mule/scripting/current/mule-scripting.xsd
+http://www.mulesoft.org/schema/mule/confluent-schema-registry/current/mule-confluent-schema-registry.xsd">
+	<sub-flow name="kafka-commons-stop-consumption-flow" doc:id="d532a631-afd2-4bdb-b06c-e8b2741ef4ec" >
+		<choice doc:name="Choice" doc:id="58b7f127-4e44-4959-b465-bcb6619d5f52">
+			<when expression="#[vars.criticalError]">
+				<scripting:execute doc:name="Execute" doc:id="00188f3a-4483-40cc-a42b-e8a98bbf246e" engine="Groovy">
+					<scripting:code><![CDATA[flow = registry.lookupByName(consumptionFlow).get();
+flow.stop()]]></scripting:code>
+					<scripting:parameters><![CDATA[#[{
+	consumptionFlow: vars.consumptionFlow
+}]]]></scripting:parameters>
+				</scripting:execute>
+			</when>
+			<otherwise>
+				<logger level="INFO" doc:name="Logger" doc:id="1f989e2c-307d-479d-bbf4-4c8399e6bbd9" message="[#[vars.consumerCommitKey]] No critical error found." />
+			</otherwise>
+		</choice>
+	</sub-flow>
+	<sub-flow name="kafka-commons-consume-messages-separately" doc:id="6f36f24f-ce15-440c-851e-83fe76322471" >
+		<set-payload value="#[output application/json --- vars.kafkaBatchPayload filter (not ($.value.tombstoneMessage default false)) and $.value.failedDeserialization is Null]" doc:name="Set Payload" doc:id="ae0e5eb6-6b65-4f2d-bcdb-f3867b4b4de5" />
+		<set-variable value="#[false]" doc:name="sapiCallFailed = false" doc:id="447d1ef6-eaa6-4bcc-ad9b-d4dd659e0e40" variableName="sapiCallFailed"/>
+		<parallel-foreach doc:name="Parallel For Each" doc:id="266797eb-e299-48d0-8e6f-a5345c806e87" maxConcurrency="${kafka.singleMessageConsumption.maxConcurrency}">
+			<set-variable value="#[payload.attributes]" doc:name="Set Variable" doc:id="0951f849-34f4-4334-821c-83f2eba44cec" variableName="messageAttributes" />
+			<set-payload value="#[[payload.value]]" doc:name="Set Payload" doc:id="83479383-6e44-40f3-857f-ad8209654957" />
+			<flow-ref doc:name="vars.sapiFlowProcessRegularMessages" doc:id="9683ca67-75e4-4ecf-80b0-8803740ba6d3" name="#[vars.sapiFlowProcessRegularMessages]" />
+			<choice doc:name="Choice" doc:id="d9e70d06-14e0-4604-b8ba-d426a7b0ec0c" >
+				<when expression="#[vars.sapiCallFailed]">
+					<ee:transform doc:name="Transform Message" doc:id="2c725097-29c8-4f90-96e8-3949308f93d5">
+						<ee:message>
+							<ee:set-payload resource="dw/prepare-failed-sapi-call-for-logging.dwl" />
+						</ee:message>
+					</ee:transform>
+					<flow-ref doc:name="vars.sapiFlowLogFailedMessages" doc:id="50138167-cfbc-4638-a800-19f8269bf6ef" name="#[vars.sapiFlowLogFailedMessages]"/>
+				</when>
+				<otherwise >
+					<logger level="INFO" doc:name="Logger" doc:id="a810a5b1-0ca7-49d3-b779-d99afecc435d" message="[#[vars.consumerCommitKey]] Single message successfully processed."/>
+				</otherwise>
+			</choice>
+		</parallel-foreach>
+	</sub-flow>
+	<sub-flow name="kafka-commons-main-consumption-steps" doc:id="10898d49-1db9-4579-8f54-c684052231ed" >
+		<set-variable value="#[attributes.consumerCommitKey]" doc:name="Set Variable" doc:id="9064f315-c880-4eef-9490-62a13e74847f" variableName="consumerCommitKey" />
+		<logger level="INFO" doc:name="Logger" doc:id="d3ac695e-e749-454f-a7a2-2c429437df1e" message="[#[vars.consumerCommitKey]] Consumer commit key stored." />
+		<parallel-foreach doc:name="Parallel For Each" doc:id="21d60414-0a5d-4034-9c24-eb8aac661a9d" collection="#[payload.serByteArray.payload]" target="payloadValues">
+			<choice doc:name="Choice" doc:id="f27f7089-4d19-4923-afb1-8216afd55c41">
+				<when expression="#[isEmpty(payload)]">
+					<set-payload value="#[tombstoneMessage: true]" doc:name="Set Payload" doc:id="ec13a57f-47bc-4558-8b98-3a7be565ebaa" />
+				</when>
+				<otherwise>
+					<try doc:name="Try" doc:id="fd8b77ef-1a06-4369-8061-76c3b58b0085">
+						<flow-ref doc:name="vars.deserializationFlow" doc:id="330a073c-b476-445c-bccf-2c8f60587807" name="#[vars.deserializationFlow]" />
+						<set-payload value="#[output application/json --- payload[0]]" doc:name="Set Payload" doc:id="a4d0591e-01c5-4066-b3e7-6e0bb0ea54b3" />
+						<error-handler>
+							<on-error-propagate enableNotifications="true" logException="true" doc:name="On Error Propagate" doc:id="1d5e8bdb-a407-427c-b3a6-18fece3c5e96" when='#[["CONFLUENT-SCHEMA-REGISTRY:CONNECTIVITY", "CONFLUENT-SCHEMA-REGISTRY:TIMEOUT"] contains error.errorType.asString]'>
+								<logger level="INFO" doc:name="Logger" doc:id="3c6d8b86-22d7-475d-93de-3c137b76639b" message="[#[vars.consumerCommitKey]] Deserialization failed due to irreproducible error, propagating error to parent flow." />
+							</on-error-propagate>
+							<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="bc227b84-c498-4cc9-ae60-f32e0a47d96d" type="ANY">
+								<set-payload value="#[failedDeserialization: error.description]" doc:name="Set Payload" doc:id="bb254ff2-7f1b-4aac-bcd4-7bc196991a77" />
+							</on-error-continue>
+						</error-handler>
+					</try>
+				</otherwise>
+			</choice>
+		</parallel-foreach>
+		<ee:transform doc:name="Transform Message" doc:id="967b2a8e-b5c5-4050-865a-ab150edab700">
+			<ee:message>
+			</ee:message>
+			<ee:variables>
+				<ee:set-variable resource="dw/zip-batch-payload-attributes-and-deserialization-results.dwl" variableName="kafkaBatchPayload" />
+			</ee:variables>
+		</ee:transform>
+		<logger level="INFO" doc:name="Logger" doc:id="c33a996c-b7f9-4752-a583-ea185aec0a6d" message="[#[vars.consumerCommitKey]] Batch payload size: #[sizeOf(vars.kafkaBatchPayload)]" />
+		<remove-variable doc:name="Remove Variable" doc:id="570c12c4-cb24-41aa-9834-6f3fd107ddc3" variableName="payloadValues" />
+		<ee:transform doc:name="Transform Message" doc:id="4053e26a-c1c6-4742-912b-a5207f006d00">
+			<ee:message>
+				<ee:set-payload resource="dw/prepare-failed-deserializations-for-logging.dwl" />
+			</ee:message>
+		</ee:transform>
+		<choice doc:name="Choice" doc:id="a75e84dc-5a08-4e01-8d58-8c2056c801eb">
+			<when expression="#[not (isEmpty(payload))]">
+				<flow-ref doc:name="vars.sapiFlowLogFailedMessages" doc:id="1df94df9-3255-4b2b-aa01-d552f8af4dba" name="#[vars.sapiFlowLogFailedMessages]" />
+			</when>
+			<otherwise>
+				<logger level="INFO" doc:name="Logger" doc:id="90da1731-7336-4c81-aaf7-936952d32b7a" message="[#[vars.consumerCommitKey]] No failed deserialization data found, continuing batch processing." />
+			</otherwise>
+		</choice>
+		<ee:transform doc:name="Transform Message" doc:id="c28452d3-446e-4e5e-8a53-9121242e3b50">
+			<ee:message>
+				<ee:set-payload resource="dw/prepare-tombstone-messages-for-order-deletion.dwl" />
+			</ee:message>
+		</ee:transform>
+		<choice doc:name="Choice" doc:id="61f0fbb5-416b-40f0-8532-cb7c14092b98">
+			<when expression="#[not (isEmpty(payload))]">
+				<flow-ref doc:name="vars.sapiFlowProcessTombstoneMessages" doc:id="38bb71ab-d3af-47d4-ba05-81f13fb96f6c" name="#[vars.sapiFlowProcessTombstoneMessages]" />
+			</when>
+			<otherwise>
+				<logger level="INFO" doc:name="Logger" doc:id="a74dbc4b-adb7-4b77-8c77-81e1ae615c4f" message="[#[vars.consumerCommitKey]] No tombstone messages found, continuing batch processing." />
+			</otherwise>
+		</choice>
+		<set-payload value="#[output application/json --- vars.kafkaBatchPayload.value filter (not ($.tombstoneMessage default false)) and $.failedDeserialization is Null]" doc:name="Set Payload" doc:id="fd7d9097-4dca-41e2-84eb-35336501e7c7" />
+		<choice doc:name="Choice" doc:id="8b3ece49-dacc-4ab6-88d2-ff7209b7e518">
+			<when expression="#[not (isEmpty(payload))]">
+				<flow-ref doc:name="vars.sapiFlowProcessRegularMessages" doc:id="7f4dfd2d-ea89-4ce3-bc44-62150ab205f5" name="#[vars.sapiFlowProcessRegularMessages]" />
+				<choice doc:name="Choice" doc:id="a072db66-21e6-42ca-a282-94d5f838a243">
+					<when expression="#[vars.sapiCallFailed]">
+						<logger level="INFO" doc:name="Logger" doc:id="82f538a9-64b7-41d4-9ef4-e3bcb4b597f3" message="[#[vars.consumerCommitKey]] Sapi call failed, starting single message consumption, max concurrency: #[if (isEmpty(p('kafka.singleMessageConsumption.maxConcurrency'))) &quot;No limitation&quot; else p('kafka.singleMessageConsumption.maxConcurrency')]" />
+						<flow-ref doc:name="kafka-commons-consume-messages-separately" doc:id="e1936fe6-bae8-4924-93a5-593f5dd3d273" name="kafka-commons-consume-messages-separately" />
+					</when>
+					<otherwise>
+						<logger level="INFO" doc:name="Logger" doc:id="2053a628-aacc-44de-a134-6efa9de70d56" message="[#[vars.consumerCommitKey]] Sapi call successful." />
+					</otherwise>
+				</choice>
+			</when>
+			<otherwise>
+				<logger level="INFO" doc:name="Logger" doc:id="5e6ac113-7d54-4ca9-a464-158acf01c926" message="[#[vars.consumerCommitKey]] No regular message data found, continuing batch processing." />
+			</otherwise>
+		</choice>
+		<logger level="INFO" doc:name="Logger" doc:id="604ce09b-bf5d-4125-b93f-347e30e31d12" message="[#[vars.consumerCommitKey]] Committing consumption." />
+	</sub-flow>
+</mule>
